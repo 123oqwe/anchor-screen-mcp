@@ -52,6 +52,15 @@ const TOOLS = [
     },
   },
   {
+    name: "screen_find_element",
+    description: "Take a screenshot and ask the VLM to locate a UI element. Returns approximate (x, y) coordinates the agent can pass to anchor-input-mcp's input_click. Closes the loop: 'click the Submit button', 'click the avatar in the top-right'.",
+    inputSchema: {
+      type: "object",
+      properties: { description: { type: "string", description: "What to find, e.g. 'Submit button', 'compose button in Gmail'" } },
+      required: ["description"],
+    },
+  },
+  {
     name: "screen_status",
     description: "Platform + screenshot tool detected + VLM ready (API key set).",
     inputSchema: { type: "object", properties: {} },
@@ -85,6 +94,36 @@ async function callTool(name: string, args: Record<string, any>): Promise<string
     case "screen_ask": {
       if (!args.question) throw new Error("question required");
       return await captureAndAsk(`Question about the current screen: ${args.question}\n\nAnswer concisely based only on what you can see.`);
+    }
+    case "screen_find_element": {
+      if (!args.description) throw new Error("description required");
+      const prompt = `Look at this screen and find this UI element: "${args.description}".
+
+Output STRICT JSON only:
+{
+  "found": true | false,
+  "x": <integer pixel coord from left edge>,
+  "y": <integer pixel coord from top edge>,
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation of how you identified the element"
+}
+
+If not found, set "found": false and explain why in "reasoning". Coordinates should be the CENTER of the element so a click on (x, y) will hit it. The screenshot is the entire screen so coordinates are screen-absolute.`;
+      const cap = captureScreen();
+      if (!cap.ok || !cap.path) throw new Error(`screenshot failed: ${cap.error}`);
+      try {
+        const base64 = screenshotToBase64(cap.path);
+        const r = await describeImage(base64, prompt);
+        if (!r.ok) throw new Error(`VLM failed: ${r.error}`);
+        const m = r.text?.match(/\{[\s\S]*\}/);
+        if (m) {
+          try {
+            const parsed = JSON.parse(m[0]);
+            return JSON.stringify({ ok: true, ...parsed, modelId: r.modelId, tokensUsed: r.tokensUsed }, null, 2);
+          } catch { /* fall through */ }
+        }
+        return JSON.stringify({ ok: false, error: "VLM did not return valid JSON", raw: r.text }, null, 2);
+      } finally { cleanupScreenshot(cap.path); }
     }
     case "screen_status":
       return JSON.stringify({ capture: statusProbe(), vlm: vlmStatus() }, null, 2);
